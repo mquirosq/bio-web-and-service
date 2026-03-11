@@ -1,0 +1,64 @@
+@BASE = http://127.0.0.1:8000
+
+### Health Check
+GET {{BASE}}/health
+
+### Illumina Assembly - Upload paired-end reads
+POST {{BASE}}/assembly/illumina?annotate=true
+Content-Type: multipart/form-data; boundary=----boundary
+
+------boundary
+Content-Disposition: form-data; name="r1"; filename="HGG6148_R1_001.fastq.gz"
+Content-Type: application/gzip
+
+< ./test-data/HGG6148_R1_001.fastq.gz
+
+------boundary
+Content-Disposition: form-data; name="r2"; filename="HGG6148_R2_001.fastq.gz"
+Content-Type: application/gzip
+
+< ./test-data/HGG6148_R2_001.fastq.gz
+------boundary--
+
+### ONT Assembly - Upload long reads
+POST {{BASE}}/assembly/ont
+Content-Type: multipart/form-data; boundary=----boundary
+
+------boundary
+Content-Disposition: form-data; name="reads"; filename="ATCC25922.fastq.gz"
+Content-Type: application/gzip
+
+< ./test-data/ATCC25922.fastq.gz
+------boundary--
+
+### Delete ALL jobs
+DELETE {{BASE}}/jobs
+
+### Get job status 
+GET {{BASE}}/jobs
+
+### Get job info
+@job_id = a64c250f-5f7a-4a1f-8c06-f0c3f03edc06
+
+GET {{BASE}}/jobs/{{job_id}}
+
+### Perform Bakta annotation
+POST {{BASE}}/annotation/bakta/existing/{{job_id}}?threads=4
+Content-Type: application/json
+
+### Download Bakta result
+GET {{BASE}}/annotation/{{job_id}}/download?format=tsv
+
+### Annotate directly from uploaded FASTA
+POST {{BASE}}/annotation/bakta/upload?threads=4
+Content-Type: multipart/form-data; boundary=----boundary
+
+------boundary
+Content-Disposition: form-data; name="assembly"; filename="ATCC25922.fasta"
+Content-Type: application/octet-stream
+
+< ./test-data/ATCC25922.fasta
+------boundary--
+
+### Retry job
+POST {{BASE}}/jobs/{{job_id}}/retry

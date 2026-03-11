@@ -1,0 +1,10 @@
+.venv
+.github
+__pycache__
+
+error.txt
+bakta50.npz
+ATCC25922.json
+pesos-modelos
+docker-servicios-bio/docker-servicios-bio/data
+docker-servicios-bio/docker-servicios-bio/test-data

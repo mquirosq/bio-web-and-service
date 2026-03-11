@@ -1,0 +1,103 @@
+services:
+  redis:
+    image: redis:8-alpine
+    container_name: bio-redis
+    volumes:
+      - bio_redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks:
+      - bio-network
+
+  bio-assembly-api:
+    build: .
+    container_name: bio-assembly-api
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data/db-light:/data/bakta_db
+      - ./data/workdir:/data/workdir
+    environment:
+      - WORKDIR_PATH=/data/workdir
+      - WORKERS=2
+      - WORKER_TIMEOUT=120
+      - REDIS_URL=redis://bio-redis:6379/0
+    command: ["conda", "run", "--no-capture-output", "-n", "bio_env", "sh", "-c", "gunicorn -c gunicorn.conf.py app:app"]
+    restart: unless-stopped
+    networks:
+      - bio-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+  # Celery worker for running assembly and annotation jobs
+  celery-worker:
+    build: .
+    container_name: bio-celery-worker
+    volumes:
+      - ./data/db-light:/data/bakta_db
+      - ./data/workdir:/data/workdir
+    environment:
+      - WORKDIR_PATH=/data/workdir
+      - REDIS_URL=redis://bio-redis:6379/0
+      - CELERY_CONCURRENCY=2
+    # You can delete --force-update for the amrfinder_update command after the first run once the database is updated
+    # -E enables Celery events which are needed for monitoring with Flower. You can remove it if you don't plan to use Flower or other monitoring tools that rely on Celery events.
+    command: ["conda", "run", "--no-capture-output", "-n", "bio_env", "sh", "-c",
+      "amrfinder_update --force_update --database /data/bakta_db/amrfinderplus-db/ || echo 'amrfinder_update failed, continuing' ; celery -A tasks worker --loglevel=info --concurrency=2 --heartbeat-interval=10 -E & celery -A tasks beat --loglevel=info"]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 16G
+        reservations:
+          cpus: '2'
+          memory: 4G
+    networks:
+      - bio-network
+
+  # Optional: Flower for Celery monitoring (access at http://localhost:5555). You can have it running by adding the "monitoring" profile when starting the stack (e.g. `docker-compose --profile monitoring up --build`)
+  flower:
+    build: .
+    container_name: bio-flower
+    depends_on:
+      - redis
+      - celery-worker
+    ports:
+      - "5555:5555"
+    environment:
+      - REDIS_URL=redis://bio-redis:6379/0
+    command: ["conda", "run", "--no-capture-output", "-n", "bio_env",
+      "celery", "-A", "tasks", "flower", "--port=5555", "--broker=redis://bio-redis:6379/0"]
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    networks:
+      - bio-network
+
+volumes:
+  bio_redis_data:
+
+networks:
+  bio-network:
+    external: true
+    name: bio-network
