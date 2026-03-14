@@ -21,7 +21,6 @@ from utils import (
     get_all_jobs,
     is_job_stale,
     REDIS_URL,
-    JOB_TTL,
     HEARTBEAT_TIMEOUT
 )
 
@@ -36,6 +35,10 @@ ASSEMBLY_SOFT_TIMEOUT = int(os.getenv("ASSEMBLY_SOFT_TIMEOUT", "72000"))  # 20 h
 ASSEMBLY_HARD_TIMEOUT = int(os.getenv("ASSEMBLY_HARD_TIMEOUT", "75000"))  # 20h 50min hard limit
 ANNOTATION_SOFT_TIMEOUT = int(os.getenv("ANNOTATION_SOFT_TIMEOUT", "36000"))  # 10 hours soft limit
 ANNOTATION_HARD_TIMEOUT = int(os.getenv("ANNOTATION_HARD_TIMEOUT", "39000"))  # 10h 50min hard limit
+DEFAULT_ANNOTATION_THREADS = int(os.getenv("DEFAULT_ANNOTATION_THREADS", "4"))
+CELERY_MAIN_QUEUE = os.getenv("CELERY_MAIN_QUEUE", "default")
+CELERY_MAINTENANCE_QUEUE = os.getenv("CELERY_MAINTENANCE_QUEUE", "maintenance")
+STALE_JOB_CLEANUP_INTERVAL_SECONDS = float(os.getenv("STALE_JOB_CLEANUP_INTERVAL_SECONDS", "300"))
 
 # Create Celery app
 celery_app = Celery(
@@ -51,6 +54,10 @@ celery_app.conf.update(
     result_serializer="json",
     timezone="UTC",
     enable_utc=True,
+    task_default_queue=CELERY_MAIN_QUEUE,
+    task_routes={
+        "tasks.cleanup_stale_jobs": {"queue": CELERY_MAINTENANCE_QUEUE},
+    },
     # Task settings
     task_acks_late=True,  # Acknowledge after task completes (not before)
     task_reject_on_worker_lost=True,  # Requeue if worker dies
@@ -64,7 +71,7 @@ celery_app.conf.update(
     beat_schedule={
         'cleanup-stale-jobs': {
             'task': 'tasks.cleanup_stale_jobs',
-            'schedule': 300.0,  # Run every 5 minutes
+            'schedule': STALE_JOB_CLEANUP_INTERVAL_SECONDS,
         },
     },
 )
@@ -341,23 +348,31 @@ def run_assembly_task(self, job_id: str, tech: str, files: dict, params: dict):
             status="assembled",
             stage="assembly",
             result_file=str(result),
+            celery_task_id="",
             message="Assembly completed successfully"
         )
         
         # Auto-annotate if requested
         if params.get("auto_annotate"):
-            ann_threads = int(params.get("annotation_threads") or 4)
+            ann_threads = int(params.get("annotation_threads") or DEFAULT_ANNOTATION_THREADS)
             append_job_log(job_id, f"Auto-annotation requested. Queuing Bakta with threads={ann_threads}")
-            update_job(job_id, status="annotation_pending", stage="annotation", message="Annotation queued")
             # Chain to annotation task
-            run_annotation_task.delay(job_id, str(result), ann_threads)
+            annotation_task = run_annotation_task.delay(job_id, str(result), ann_threads)
+            update_job(
+                job_id,
+                status="annotation_pending",
+                stage="annotation",
+                celery_task_id=annotation_task.id,
+                message="Annotation queued"
+            )
+            append_job_log(job_id, f"Annotation task queued. Task ID: {annotation_task.id}")
         
         return {"job_id": job_id, "status": "assembled", "result_file": str(result)}
     
     except SoftTimeLimitExceeded:
         error_msg = f"Assembly timed out after {ASSEMBLY_SOFT_TIMEOUT} seconds"
         append_job_log(job_id, f"[TIMEOUT] {error_msg}")
-        update_job(job_id, status="failed", stage="assembly", message=error_msg)
+        update_job(job_id, status="failed", stage="assembly", celery_task_id="", message=error_msg)
         return {"job_id": job_id, "status": "failed", "error": error_msg}
         
     except Exception as e:
@@ -365,7 +380,14 @@ def run_assembly_task(self, job_id: str, tech: str, files: dict, params: dict):
         error_trace = traceback.format_exc()
         append_job_log(job_id, f"[ERROR] {error_msg}")
         append_job_log(job_id, f"[TRACEBACK] {error_trace}")
-        update_job(job_id, status="failed", stage="assembly", message=error_msg, error_trace=error_trace)
+        update_job(
+            job_id,
+            status="failed",
+            stage="assembly",
+            celery_task_id="",
+            message=error_msg,
+            error_trace=error_trace
+        )
         return {"job_id": job_id, "status": "failed", "error": error_msg}
 
 
@@ -408,6 +430,7 @@ def run_annotation_task(self, job_id: str, contigs_path: str, threads: int):
             status="annotated",
             stage="annotation",
             annotation_file=str(gff_file),
+            celery_task_id="",
             message="Annotation completed successfully"
         )
         
@@ -416,7 +439,7 @@ def run_annotation_task(self, job_id: str, contigs_path: str, threads: int):
     except SoftTimeLimitExceeded:
         error_msg = f"Annotation timed out after {ANNOTATION_SOFT_TIMEOUT} seconds"
         append_job_log(job_id, f"[TIMEOUT] {error_msg}")
-        update_job(job_id, status="failed", stage="annotation", message=error_msg)
+        update_job(job_id, status="failed", stage="annotation", celery_task_id="", message=error_msg)
         return {"job_id": job_id, "status": "failed", "error": error_msg}
         
     except Exception as e:
@@ -424,7 +447,14 @@ def run_annotation_task(self, job_id: str, contigs_path: str, threads: int):
         error_trace = traceback.format_exc()
         append_job_log(job_id, f"[ERROR] {error_msg}")
         append_job_log(job_id, f"[TRACEBACK] {error_trace}")
-        update_job(job_id, status="failed", stage="annotation", message=error_msg, error_trace=error_trace)
+        update_job(
+            job_id,
+            status="failed",
+            stage="annotation",
+            celery_task_id="",
+            message=error_msg,
+            error_trace=error_trace
+        )
         return {"job_id": job_id, "status": "failed", "error": error_msg}
 
 

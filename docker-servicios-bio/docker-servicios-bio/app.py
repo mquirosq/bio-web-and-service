@@ -4,13 +4,11 @@ Bioinformatics Assembly API
 FastAPI application for genome assembly and annotation.
 Jobs are executed by Celery workers for proper distributed processing.
 """
-from fastapi import FastAPI, UploadFile, HTTPException
+from fastapi import FastAPI, UploadFile, HTTPException, Query
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
 import uuid
 import shutil
 from pathlib import Path
-from enum import Enum
 import os
 from typing import Optional
 import logging
@@ -32,18 +30,29 @@ from utils import (
     append_job_log,
     get_job_logs,
     get_all_jobs,
-    delete_job,
-    JOB_TTL
+    delete_job
 )
 
-# Configure logging
+WORKDIR = Path(os.getenv("WORKDIR_PATH", "/data/workdir"))
+WORKDIR.mkdir(parents=True, exist_ok=True)
+
+DEFAULT_MIN_CONTIG = int(os.getenv("DEFAULT_MIN_CONTIG", "500"))
+DEFAULT_ILLUMINA_THREADS = int(os.getenv("DEFAULT_ILLUMINA_THREADS", "4"))
+DEFAULT_ILLUMINA_MEMORY_GB = int(os.getenv("DEFAULT_ILLUMINA_MEMORY_GB", "8"))
+DEFAULT_ONT_THREADS = int(os.getenv("DEFAULT_ONT_THREADS", "4"))
+DEFAULT_ANNOTATION_THREADS = int(os.getenv("DEFAULT_ANNOTATION_THREADS", "4"))
+
+# Configure logging after the workdir exists so file logging cannot fail at import time.
+log_handlers = [logging.StreamHandler()]
+try:
+    log_handlers.append(logging.FileHandler(WORKDIR / "assembly_api.log"))
+except OSError:
+    pass
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('/data/workdir/assembly_api.log')
-    ]
+    handlers=log_handlers
 )
 logger = logging.getLogger(__name__)
 
@@ -53,40 +62,14 @@ app = FastAPI(
     version="2.0.0"
 )
 
-WORKDIR = Path(os.getenv("WORKDIR_PATH", "/data/workdir"))
-WORKDIR.mkdir(parents=True, exist_ok=True)
+CANCELLABLE_STATUSES = {"pending", "running", "annotation_pending"}
 
 # Verify Redis connection at startup
 try:
-    redis_client = get_redis()
-    redis_client.ping()
+    get_redis().ping()
     logger.info("Redis connection established")
 except Exception as e:
     logger.warning(f"Redis connection failed at startup: {e}")
-    redis_client = None
-
-
-class Technology(str, Enum):
-    illumina = "illumina"
-    ont = "ont"
-
-
-class AssemblyRequest(BaseModel):
-    tech: Technology
-    min_contig: int = 500
-    threads: int = 4
-    memory: int = 8
-    assembler: str = None
-
-
-class JobStatus(BaseModel):
-    job_id: str
-    status: str  # pending, running, assembled, annotated, failed
-    stage: str = None  # assembly, annotation
-    message: str = None
-    result_file: str = None
-    tech: str = None
-    retry_count: int = 0
 
 
 # ============== API Endpoints ==============
@@ -95,12 +78,12 @@ class JobStatus(BaseModel):
 async def assemble_illumina(
     r1: UploadFile,
     r2: UploadFile = None,
-    min_contig: int = 500,
-    threads: int = 4,
-    memory: int = 8,
+    min_contig: int = Query(DEFAULT_MIN_CONTIG, ge=0),
+    threads: int = Query(DEFAULT_ILLUMINA_THREADS, ge=1),
+    memory: int = Query(DEFAULT_ILLUMINA_MEMORY_GB, ge=1),
     assembler: str = None,
     annotate: bool = False,
-    annotation_threads: int = 4
+    annotation_threads: int = Query(DEFAULT_ANNOTATION_THREADS, ge=1)
 ):
     """Submit Illumina assembly job"""
     job_id = str(uuid.uuid4())
@@ -156,11 +139,11 @@ async def assemble_illumina(
 @app.post("/assembly/ont")
 async def assemble_ont(
     reads: UploadFile,
-    min_contig: int = 500,
-    threads: int = 4,
+    min_contig: int = Query(DEFAULT_MIN_CONTIG, ge=0),
+    threads: int = Query(DEFAULT_ONT_THREADS, ge=1),
     assembler: str = None,
     annotate: bool = False,
-    annotation_threads: int = 4
+    annotation_threads: int = Query(DEFAULT_ANNOTATION_THREADS, ge=1)
 ):
     """Submit ONT assembly job"""
     job_id = str(uuid.uuid4())
@@ -190,7 +173,6 @@ async def assemble_ont(
 
     params = {
         "threads": threads,
-        "memory": 8,
         "min_contig": min_contig,
         "assembler": assembler,
         "auto_annotate": annotate,
@@ -248,12 +230,12 @@ async def retry_job(job_id: str):
                 files["r2"] = r2_path
 
             params = {
-                "threads": int(job.get("threads", 4)),
-                "memory": int(job.get("memory", 8)),
-                "min_contig": int(job.get("min_contig", 500)),
+                "threads": int(job.get("threads", DEFAULT_ILLUMINA_THREADS)),
+                "memory": int(job.get("memory", DEFAULT_ILLUMINA_MEMORY_GB)),
+                "min_contig": int(job.get("min_contig", DEFAULT_MIN_CONTIG)),
                 "assembler": job.get("assembler") or None,
                 "auto_annotate": job.get("auto_annotate") == "True",
-                "annotation_threads": int(job.get("annotation_threads", 4))
+                "annotation_threads": int(job.get("annotation_threads", DEFAULT_ANNOTATION_THREADS))
             }
 
         elif tech == "ont":
@@ -264,12 +246,11 @@ async def retry_job(job_id: str):
 
             files = {"reads": reads_path}
             params = {
-                "threads": int(job.get("threads", 4)),
-                "memory": 8,
-                "min_contig": int(job.get("min_contig", 500)),
+                "threads": int(job.get("threads", DEFAULT_ONT_THREADS)),
+                "min_contig": int(job.get("min_contig", DEFAULT_MIN_CONTIG)),
                 "assembler": job.get("assembler") or None,
                 "auto_annotate": job.get("auto_annotate") == "True",
-                "annotation_threads": int(job.get("annotation_threads", 4))
+                "annotation_threads": int(job.get("annotation_threads", DEFAULT_ANNOTATION_THREADS))
             }
         else:
             raise HTTPException(status_code=400, detail=f"Unknown technology: {tech}")
@@ -301,12 +282,12 @@ async def retry_job(job_id: str):
         if not contigs_path or not os.path.exists(contigs_path):
             raise HTTPException(status_code=400, detail="Contigs file not found.")
 
-        threads = int(job.get("threads", 4))
+        threads = int(job.get("annotation_threads", job.get("threads", DEFAULT_ANNOTATION_THREADS)))
         new_retry_count = retry_count + 1
 
         update_job(
             job_id,
-            status="pending",
+            status="annotation_pending",
             stage="annotation",
             retry_count=str(new_retry_count),
             message=f"Retry attempt {new_retry_count}/3"
@@ -318,7 +299,7 @@ async def retry_job(job_id: str):
 
         return {
             "job_id": job_id,
-            "status": "pending",
+            "status": "annotation_pending",
             "retry_count": new_retry_count,
             "celery_task_id": task.id,
             "message": f"Annotation resubmitted (attempt {new_retry_count}/3)"
@@ -329,7 +310,7 @@ async def retry_job(job_id: str):
 
 
 @app.post("/annotation/bakta/existing/{job_id}")
-async def annotate_bakta(job_id: str, threads: int = 4):
+async def annotate_bakta(job_id: str, threads: int = Query(DEFAULT_ANNOTATION_THREADS, ge=1)):
     """Submit Bakta annotation job for a completed assembly"""
     job = get_job(job_id)
     if not job:
@@ -349,7 +330,13 @@ async def annotate_bakta(job_id: str, threads: int = 4):
         raise HTTPException(status_code=400, detail="Contigs file not found")
 
     task = run_annotation_task.delay(job_id, contigs_path, threads)
-    update_job(job_id, threads=str(threads), stage="annotation", status="pending", celery_task_id=task.id)
+    update_job(
+        job_id,
+        annotation_threads=str(threads),
+        stage="annotation",
+        status="annotation_pending",
+        celery_task_id=task.id
+    )
     append_job_log(job_id, f"Annotation submitted to Celery. Task ID: {task.id}")
 
     return {"job_id": job_id, "status": "annotation_pending", "celery_task_id": task.id}
@@ -358,7 +345,7 @@ async def annotate_bakta(job_id: str, threads: int = 4):
 @app.post("/annotation/bakta/upload")
 async def annotate_bakta_from_file(
     assembly: UploadFile,
-    threads: int = 4
+    threads: int = Query(DEFAULT_ANNOTATION_THREADS, ge=1)
 ):
     """Submit Bakta annotation job directly from an uploaded assembly FASTA"""
     job_id = str(uuid.uuid4())
@@ -371,12 +358,12 @@ async def annotate_bakta_from_file(
         shutil.copyfileobj(assembly.file, f)
 
     set_job(job_id, {
-        "status": "pending",
+        "status": "annotation_pending",
         "stage": "annotation",
         "tech": "annotation_only",
         "retry_count": "0",
         "result_file": str(contigs_path),
-        "threads": str(threads),
+        "annotation_threads": str(threads),
         "annotation_file": ""
     })
     append_job_log(job_id, f"Annotation-only job created. Assembly: {contigs_path}")
@@ -443,10 +430,17 @@ async def cancel_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
+    status = job.get("status")
+    if status not in CANCELLABLE_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot cancel job with status '{status}'. Only pending or running jobs can be cancelled."
+        )
+
     celery_task_id = job.get("celery_task_id")
     if celery_task_id:
         celery_app.control.revoke(celery_task_id, terminate=True)
-        update_job(job_id, status="cancelled", message="Job cancelled by user")
+        update_job(job_id, status="cancelled", celery_task_id="", message="Job cancelled by user")
         append_job_log(job_id, "Job cancelled by user")
         return {"job_id": job_id, "status": "cancelled"}
 
@@ -532,6 +526,9 @@ async def download_annotation_result(
 @app.delete("/jobs/old/{days}")
 async def delete_old_jobs(days: int):
     """Delete jobs older than specified days"""
+    if days < 0:
+        raise HTTPException(status_code=400, detail="Days must be greater than or equal to 0")
+
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     job_ids = get_all_jobs()
     deleted_count = 0

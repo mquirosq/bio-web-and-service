@@ -18,7 +18,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 JOB_TTL = 7 * 24 * 60 * 60
 
 # Heartbeat timeout in seconds - jobs without heartbeat for this long are considered stale
-HEARTBEAT_TIMEOUT = 7200  # 2h
+HEARTBEAT_TIMEOUT = 72000  # 20h
 
 # Redis client singleton
 _redis_client: Optional[redis.Redis] = None
