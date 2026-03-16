@@ -23,9 +23,9 @@ Ensure-Network $NETWORK_NAME
 
 Write-Host "Desplegando Servicio Conversión..."
 if (Get-Command docker-compose -ErrorAction SilentlyContinue) {
-    docker-compose -f (Join-Path $STACK_SERVICIO_DIR 'docker-compose.yml') -p bio-service up -d --build --no-cache
+    docker-compose -f (Join-Path $STACK_SERVICIO_DIR 'docker-compose.yml') -p bio-service up -d --build
 } else {
-    docker compose -f (Join-Path $STACK_SERVICIO_DIR 'docker-compose.yml') -p bio-service up -d --build --no-cache
+    docker compose -f (Join-Path $STACK_SERVICIO_DIR 'docker-compose.yml') -p bio-service up -d --build
 }
 
 Write-Host "Desplegando Servicio Web..."
