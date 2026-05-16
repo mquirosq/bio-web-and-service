@@ -1,0 +1,5 @@
+{
+  "python.testing.pytestArgs": ["cocos"],
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestEnabled": true
+}
